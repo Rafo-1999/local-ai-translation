@@ -49,6 +49,48 @@
             <artifactId>rest-assured</artifactId>
             <scope>test</scope>
         </dependency>
+
+        <!-- for com.polixis.tools.Main: calls longest-name-ai-translation-service and nlp-service directly -->
+        <dependency>
+            <groupId>com.ardis</groupId>
+            <artifactId>ardis-batch</artifactId>
+            <version>2.11.266-SNAPSHOT</version>
+        </dependency>
+        <dependency>
+            <groupId>com.ardis.nlp</groupId>
+            <artifactId>nlp-client</artifactId>
+            <version>3.1.4-SNAPSHOT</version>
+        </dependency>
+        <dependency>
+            <groupId>com.ardis.entity</groupId>
+            <artifactId>ardis-entity-api</artifactId>
+            <version>1.7.1-SNAPSHOT</version>
+        </dependency>
+        <dependency>
+            <groupId>org.mongodb</groupId>
+            <artifactId>mongodb-driver-sync</artifactId>
+            <version>4.2.3</version>
+        </dependency>
+        <!-- pin to match mongodb-driver-sync - the Quarkus BOM manages a newer, binary-incompatible version -->
+        <dependency>
+            <groupId>org.mongodb</groupId>
+            <artifactId>mongodb-driver-core</artifactId>
+            <version>4.2.3</version>
+        </dependency>
+        <dependency>
+            <groupId>org.mongodb</groupId>
+            <artifactId>bson</artifactId>
+            <version>4.2.3</version>
+        </dependency>
+        <dependency>
+            <groupId>org.zalando</groupId>
+            <artifactId>jackson-datatype-problem</artifactId>
+            <version>0.26.0</version>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jsr310</artifactId>
+        </dependency>
     </dependencies>
 
     <build>
