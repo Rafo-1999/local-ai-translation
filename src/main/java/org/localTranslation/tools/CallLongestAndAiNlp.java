@@ -39,7 +39,7 @@ import com.mongodb.client.model.UpdateOptions;
 import com.mongodb.client.model.Updates;
 import io.vavr.control.Either;
 
-public class Main {
+public class CallLongestAndAiNlp {
 
     private record CollectionNamePair(String collection, String workingCollection) {
     }

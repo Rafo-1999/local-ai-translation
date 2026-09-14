@@ -25,7 +25,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
  * <p>Requires ai-nlp-service running locally on {@link #AI_NLP_BASE_URL} (started separately -
  * this class never modifies ai-translation-service, only calls its already-running REST API).
  */
-public class Translation {
+public class TranslationFromCSV {
 
     private static final Path CSV_PATH = Path.of("src/main/resources/chinese.csv");
     private static final String AI_NLP_BASE_URL = "http://localhost:8081";
