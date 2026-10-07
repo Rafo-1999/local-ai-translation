@@ -16,21 +16,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
-/**
- * Reads Chinese words from {@link #CSV_PATH}, translates each to English by calling the real
- * ai-nlp-service (POST /api/ai-nlp/translations/batch) - the exact same TranslationEngine,
- * NameNormalizer and cleanTranslation logic used in production - and writes "original,translated"
- * back into the same file.
- *
- * <p>Requires ai-nlp-service running locally on {@link #AI_NLP_BASE_URL} (started separately -
- * this class never modifies ai-translation-service, only calls its already-running REST API).
- */
 public class TranslationFromCSV {
 
     private static final Path CSV_PATH = Path.of("src/main/resources/chinese.csv");
     private static final String AI_NLP_BASE_URL = "http://localhost:8081";
-    private static final String SOURCE_LANGUAGE = "zh";
-    private static final String PROVIDER = "DEEPSEEK";
+    private static final String SOURCE_LANGUAGE = "tr";
+    private static final String PROVIDER = "GEMINI";
 
     static void main() throws Exception {
         List<String> lines = Files.readAllLines(CSV_PATH, StandardCharsets.UTF_8);
@@ -102,7 +93,7 @@ public class TranslationFromCSV {
         requestBody.set("items", items);
 
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(AI_NLP_BASE_URL + "/api/ai-nlp/translations/batch"))
+                .uri(URI.create(AI_NLP_BASE_URL + "/aiNlp/translations/batch"))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(requestBody), StandardCharsets.UTF_8))
                 .build();
