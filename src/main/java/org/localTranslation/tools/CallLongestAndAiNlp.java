@@ -54,13 +54,13 @@ public class CallLongestAndAiNlp {
         boolean promoteNlpCollections = true;
 
         String mongoUri = "mongodb://localhost:27017";
-        String database = "entity_test1_registry";
+        String database = "entity_tr_registry_2";
 
-        AiProvider longestNameProvider = AiProvider.GOOGLE_TRANSLATE;
+        AiProvider longestNameProvider = AiProvider.GEMINI;
         boolean longestOrganization = true;
         boolean longestPerson = false;
 
-        AiProvider nlpProvider = AiProvider.GOOGLE_TRANSLATE;
+        AiProvider nlpProvider = AiProvider.GEMINI;
 
         RequestConfig aiNlp = new RequestConfig(Set.of(LanguageCode.ENGLISH), false, TransliterationMethod.AI_NLP);
         RequestConfig rules = new RequestConfig(Set.of(LanguageCode.ENGLISH), false, TransliterationMethod.RULES);
@@ -94,9 +94,10 @@ public class CallLongestAndAiNlp {
     private static final String NLP_URL = "http://192.168.1.16:30646";
     private static final String JAVA_TIME_MODULE_ID = "com.fasterxml.jackson.datatype.jsr310.JavaTimeModule";
     private static final int CONCURRENCY = 16;
+    private static final int DOCUMENTS_PER_REQUEST = 50;
 
     private static final Part NAME = new Part("names", "nameRecords", "original", "language", true);
-    private static final Part ADDRESS = new Part("address", "addressRecords", "address", "ln", false);
+    private static final Part ADDRESS = new Part("address", null, "address", "ln", false);
     private static final List<Part> PARTS = List.of(NAME, ADDRESS);
 
     private record Part(String entriesKey, String recordsKey, String textKey, String languageKey,
@@ -117,91 +118,123 @@ public class CallLongestAndAiNlp {
         }
     }
 
+    private record Work(Document doc, String publisher, Map<String, List<Document>> arrays) {
+    }
+
+    private record Item(Document entry, String publisher) {
+    }
+
+    private record Mirror(Document entry, Document record) {
+    }
+
     private record NlpJob(TransliterationClient client, AiProvider provider, String database, String collectionName,
                           EntityConfig config, MongoCollection<Document> target, AtomicInteger updated,
-                          AtomicInteger failed) {
+                          AtomicInteger repeated, AtomicInteger failed) {
 
-        void run(Document doc) {
+        void run(List<Document> docs) {
             try {
-                translate(doc);
+                translate(docs);
             } catch (RuntimeException e) {
-                countFailure(e.toString());
+                if (docs.size() == 1) {
+                    countFailure(e.toString());
+                    return;
+                }
+                if (repeated.incrementAndGet() <= 5) {
+                    System.out.println("[nlp] " + docs.size() + " documents failed together: " + e
+                            + " - trying them one by one");
+                }
+                docs.forEach(doc -> run(List.of(doc)));
             }
         }
 
-        private void translate(Document doc) {
-            String publisher = resolvePublisher(doc);
-            Map<String, List<Document>> arrays = new LinkedHashMap<>();
+        private void translate(List<Document> docs) {
+            List<Work> works = docs.stream()
+                    .map(doc -> new Work(doc, resolvePublisher(doc), new LinkedHashMap<>()))
+                    .toList();
+            int sent = 0;
             for (Part part : PARTS) {
                 RequestConfig request = config.requestFor(part);
-                if (request == null) {
-                    continue;
+                if (request != null) {
+                    sent += translatePart(works, request, part);
                 }
-                List<Document> entries = arrayOf(doc, part.entriesKey());
-                List<Document> records = arrayOf(doc, part.recordsKey());
-                send(publisher, request, entries.stream().filter(entry -> isSendable(entry, part)).toList(), part);
-                translateRecords(publisher, request, records, entries, part);
-                arrays.put(part.entriesKey(), entries);
-                arrays.put(part.recordsKey(), records);
             }
-            List<Bson> updates = arrays.entrySet().stream()
+            works.forEach(this::save);
+            updated.addAndGet(sent);
+        }
+
+        private void save(Work work) {
+            List<Bson> updates = work.arrays().entrySet().stream()
                     .filter(array -> !array.getValue().isEmpty())
                     .map(array -> Updates.set(array.getKey(), array.getValue()))
                     .toList();
             if (!updates.isEmpty()) {
-                target.updateOne(Filters.eq("_id", doc.get("_id")), Updates.combine(updates));
+                target.updateOne(Filters.eq("_id", work.doc().get("_id")), Updates.combine(updates));
             }
         }
 
-        private void translateRecords(String publisher, RequestConfig request, List<Document> records,
-                                      List<Document> entries, Part part) {
-            Map<String, Document> entryByText = entries.stream()
-                    .filter(entry -> entry.getString(part.textKey()) != null)
-                    .collect(Collectors.toMap(entry -> entry.getString(part.textKey()), Function.identity(),
-                            (first, second) -> first));
-            List<Document> toSend = new ArrayList<>();
-            for (Document record : records) {
-                String text = record.getString(part.textKey());
-                if (text == null || sourceLanguage(record, part) == null) {
-                    continue;
+        private int translatePart(List<Work> works, RequestConfig request, Part part) {
+            List<Item> toSend = new ArrayList<>();
+            List<Mirror> mirrors = new ArrayList<>();
+            for (Work work : works) {
+                List<Document> entries = arrayOf(work.doc(), part.entriesKey());
+                List<Document> records = arrayOf(work.doc(), part.recordsKey());
+                Map<String, Document> entryByText = entries.stream()
+                        .filter(entry -> entry.getString(part.textKey()) != null)
+                        .collect(Collectors.toMap(entry -> entry.getString(part.textKey()), Function.identity(),
+                                (first, second) -> first));
+                for (Document entry : entries) {
+                    if (isSendable(entry, part)) {
+                        toSend.add(new Item(entry, work.publisher()));
+                    }
                 }
-                Document sameEntry = entryByText.get(text);
-                if (sameEntry != null) {
-                    copyAnswer(sameEntry, record);
-                } else if (!text.isBlank()) {
-                    toSend.add(record);
+                for (Document record : records) {
+                    String text = record.getString(part.textKey());
+                    if (text == null || sourceLanguage(record, part) == null) {
+                        continue;
+                    }
+                    Document sameEntry = entryByText.get(text);
+                    if (sameEntry != null) {
+                        mirrors.add(new Mirror(sameEntry, record));
+                    } else if (!text.isBlank()) {
+                        toSend.add(new Item(record, work.publisher()));
+                    }
+                }
+                work.arrays().put(part.entriesKey(), entries);
+                if (part.recordsKey() != null) {
+                    work.arrays().put(part.recordsKey(), records);
                 }
             }
-            send(publisher, request, toSend, part);
+            int sent = send(toSend, request, part);
+            mirrors.forEach(mirror -> copyAnswer(mirror.entry(), mirror.record()));
+            return sent;
         }
 
-        private void send(String publisher, RequestConfig request, List<Document> entries, Part part) {
-            if (entries.isEmpty()) {
-                return;
+        private int send(List<Item> items, RequestConfig request, Part part) {
+            if (items.isEmpty()) {
+                return 0;
             }
-            List<TransliterationRequest> requests = entries.stream()
-                    .map(entry -> new TransliterationRequest(entry.getString(part.textKey()),
-                            sourceLanguage(entry, part), LanguageCode.ENGLISH, request.alternatives(),
-                            request.verify(), request.method(), provider, database, publisher, collectionName))
+            List<TransliterationRequest> requests = items.stream()
+                    .map(item -> new TransliterationRequest(item.entry().getString(part.textKey()),
+                            sourceLanguage(item.entry(), part), LanguageCode.ENGLISH, request.alternatives(),
+                            request.verify(), request.method(), provider, database, item.publisher(),
+                            collectionName))
                     .toList();
             Either<?, List<TransliterationResponse>> result = client.transliterate(requests);
             if (result.isLeft()) {
-                countFailure(collectionName + ": " + result.getLeft());
-                return;
+                throw new IllegalStateException(collectionName + ": " + result.getLeft());
             }
             List<TransliterationResponse> responses = result.get();
-            if (responses.size() != entries.size()) {
-                countFailure(collectionName + ": " + entries.size() + " requests but " + responses.size()
-                        + " answers");
-                return;
+            if (responses.size() != items.size()) {
+                throw new IllegalStateException(collectionName + ": " + items.size() + " requests but "
+                        + responses.size() + " answers");
             }
-            for (int i = 0; i < entries.size(); i++) {
-                Document entry = entries.get(i);
+            for (int i = 0; i < items.size(); i++) {
+                Document entry = items.get(i).entry();
                 TransliterationResponse response = responses.get(i);
                 entry.put("en", response.getText());
                 response.getCodeOpt().ifPresent(code -> entry.put(part.languageKey(), code.get()));
             }
-            updated.addAndGet(entries.size());
+            return items.size();
         }
 
         private void countFailure(String message) {
@@ -235,8 +268,9 @@ public class CallLongestAndAiNlp {
     private static String resolvePublisher(MongoCollection<Document> collection) {
         List<String> publishers = collection.distinct("metadata.publisher", String.class).into(new ArrayList<>());
         if (publishers.size() > 1) {
-            System.out.println("[publisher] WARNING: collection has multiple publishers " + publishers
-                    + ", using first: " + publishers.getFirst());
+            System.out.println("[publisher] collection has multiple publishers " + publishers
+                    + "; the service translates every document under its own publisher, the first one ("
+                    + publishers.getFirst() + ") is only the fallback for documents without one");
         }
         return publishers.isEmpty() ? null : publishers.getFirst();
     }
@@ -248,7 +282,7 @@ public class CallLongestAndAiNlp {
     }
 
     private static List<Document> arrayOf(Document doc, String array) {
-        return doc.getList(array, Document.class, List.of());
+        return array == null ? List.of() : doc.getList(array, Document.class, List.of());
     }
 
     private static LanguageCode sourceLanguage(Document entry, Part part) {
@@ -304,6 +338,7 @@ public class CallLongestAndAiNlp {
 
         TransliterationClient client = nlpClient();
         AtomicInteger updated = new AtomicInteger();
+        AtomicInteger repeated = new AtomicInteger();
         AtomicInteger done = new AtomicInteger();
         Map<String, AtomicInteger> failedByCollection = new LinkedHashMap<>();
         ExecutorService executor = Executors.newFixedThreadPool(CONCURRENCY);
@@ -316,11 +351,19 @@ public class CallLongestAndAiNlp {
                 continue;
             }
             MongoCollection<Document> copy = copyForNlp(mongoDatabase, collectionName, config);
-            NlpJob job = new NlpJob(client, provider, database, collectionName, config, copy, updated,
+            NlpJob job = new NlpJob(client, provider, database, collectionName, config, copy, updated, repeated,
                     new AtomicInteger());
             failedByCollection.put(collectionName, job.failed());
+            List<Document> group = new ArrayList<>();
             for (Document doc : copy.find().noCursorTimeout(true).batchSize(500)) {
-                submit(executor, queued, done, () -> job.run(doc));
+                group.add(doc);
+                if (group.size() == DOCUMENTS_PER_REQUEST) {
+                    submit(executor, queued, done, job, group);
+                    group = new ArrayList<>();
+                }
+            }
+            if (!group.isEmpty()) {
+                submit(executor, queued, done, job, group);
             }
         }
 
@@ -330,7 +373,8 @@ public class CallLongestAndAiNlp {
         failedByCollection.forEach((collectionName, failed) ->
                 promote(mongoDatabase, collectionName, failed.get(), promoteNlpCollections));
         System.out.println("[nlp] Updated " + updated.get() + " fields, "
-                + failedByCollection.values().stream().mapToInt(AtomicInteger::get).sum() + " failed");
+                + failedByCollection.values().stream().mapToInt(AtomicInteger::get).sum() + " failed, "
+                + repeated.get() + " groups of documents were repeated one by one");
     }
 
     private static TransliterationClient nlpClient() throws MalformedURLException {
@@ -353,7 +397,9 @@ public class CallLongestAndAiNlp {
         for (Part part : PARTS) {
             if (config.requestFor(part) != null) {
                 unsetEn(copy, part.entriesKey());
-                unsetEn(copy, part.recordsKey());
+                if (part.recordsKey() != null) {
+                    unsetEn(copy, part.recordsKey());
+                }
             }
         }
         return copy;
@@ -407,15 +453,16 @@ public class CallLongestAndAiNlp {
         }
     }
 
-    private static void submit(ExecutorService executor, Semaphore queued, AtomicInteger done, Runnable work) {
+    private static void submit(ExecutorService executor, Semaphore queued, AtomicInteger done, NlpJob job,
+                               List<Document> docs) {
         queued.acquireUninterruptibly();
         executor.execute(() -> {
             try {
-                work.run();
+                job.run(docs);
             } finally {
                 queued.release();
-                int finished = done.incrementAndGet();
-                if (finished % 500 == 0) {
+                int finished = done.addAndGet(docs.size());
+                if (finished / 500 > (finished - docs.size()) / 500) {
                     System.out.println("[nlp] " + finished + " documents done");
                 }
             }
